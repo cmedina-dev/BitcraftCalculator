@@ -61,8 +61,10 @@ function App() {
       </header>
 
       <main>
-        {activeTab === "calculator" && <CalculatorTab items={items} onSwitchToRegistry={() => setActiveTab("manager")} />}
-        {activeTab === "manager" && (
+        <div style={{ display: activeTab === "calculator" ? undefined : 'none' }}>
+          <CalculatorTab items={items} onSwitchToRegistry={() => setActiveTab("manager")} />
+        </div>
+        <div style={{ display: activeTab === "manager" ? undefined : 'none' }}>
           <ManagerTab
             items={items}
             onAdd={() =>
@@ -78,7 +80,7 @@ function App() {
             onEdit={setEditingItem}
             onDelete={deleteItem}
           />
-        )}
+        </div>
       </main>
 
       {editingItem && (
@@ -403,6 +405,10 @@ function CalculatorTab({ items, onSwitchToRegistry }: { items: Item[]; onSwitchT
     setTargets((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const clearTargets = () => {
+    setTargets([{ itemId: items[0]?.id || "", quantity: 1 }]);
+  };
+
   const hasValidTargets = targets.some((t) => t.itemId);
 
   const itemsByName = useMemo(() => new Map(items.map(i => [i.name, i])), [items]);
@@ -450,15 +456,27 @@ function CalculatorTab({ items, onSwitchToRegistry }: { items: Item[]; onSwitchT
       <form className="mb-lg" onSubmit={(e) => e.preventDefault()}>
         <div className="flex items-center justify-between mb-md">
           <h3>Production Run</h3>
-          <button
-            type="button"
-            className="btn-outline text-sm"
-            onClick={addTarget}
-            disabled={targets.length >= MAX_TARGETS}
-          >
-            <Plus size={16} aria-hidden="true" />
-            Add Item
-          </button>
+          <div className="flex items-center gap-sm">
+            {(targets.length > 1 || targets[0]?.quantity > 1) && (
+              <button
+                type="button"
+                className="btn-outline text-sm"
+                onClick={clearTargets}
+              >
+                <Trash2 size={16} aria-hidden="true" />
+                Clear
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn-outline text-sm"
+              onClick={addTarget}
+              disabled={targets.length >= MAX_TARGETS}
+            >
+              <Plus size={16} aria-hidden="true" />
+              Add Item
+            </button>
+          </div>
         </div>
         <div className="flex-col" style={{ gap: "0.5rem" }}>
           {targets.map((target, idx) => (
