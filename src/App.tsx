@@ -194,6 +194,160 @@ function hasWorkstation(ws: string | undefined): boolean {
   return !!ws && ws.toLowerCase() !== 'none';
 }
 
+interface FlatCraftingStepIngredient {
+  itemName: string;
+  perCraft: number;
+}
+
+interface FlatCraftingStep {
+  itemName: string;
+  workstation: string;
+  tier: string;
+  craftsPerformed: number;
+  quantityNeeded: number;
+  producedRange: { min: number; max: number };
+  newLeftoversRange: { min: number; max: number };
+  byproductRanges: { itemName: string; range: { min: number; max: number } }[];
+  ingredients: FlatCraftingStepIngredient[];
+}
+
+function flattenCraftingTrees(
+  trees: CalculationResult['trees'],
+  itemsByName: Map<string, Item>,
+  itemsById: Map<string, Item>,
+): FlatCraftingStep[] {
+  // Phase 1: Walk trees, merge duplicate steps, and collect dependency edges.
+  const merged = new Map<string, FlatCraftingStep>();
+  // deps: key → set of keys that must come before it
+  const deps = new Map<string, Set<string>>();
+
+  function isBaseResource(node: CraftingStep): boolean {
+    const itemDef = itemsByName.get(node.itemName);
+    return !itemDef || itemDef.recipe.length === 0;
+  }
+
+  function stepKey(node: CraftingStep): string {
+    return isBaseResource(node)
+      ? `gather|${node.itemName}`
+      : `${node.itemName}|${node.workstation}`;
+  }
+
+  function walk(node: CraftingStep) {
+    for (const child of node.children) {
+      walk(child);
+    }
+
+    // Skip crafted items that needed 0 additional crafts (fully covered by leftovers)
+    if (!isBaseResource(node) && node.craftsPerformed === 0) return;
+
+    const key = stepKey(node);
+    const existing = merged.get(key);
+
+    const ingredients: FlatCraftingStepIngredient[] = node.children.map((child) => ({
+      itemName: child.itemName,
+      perCraft: node.craftsPerformed > 0 ? child.quantityNeeded / node.craftsPerformed : child.quantityNeeded,
+    }));
+
+    if (existing) {
+      existing.craftsPerformed += node.craftsPerformed;
+      existing.quantityNeeded += node.quantityNeeded;
+      existing.producedRange.min += node.producedRange.min;
+      existing.producedRange.max += node.producedRange.max;
+      existing.newLeftoversRange.min += node.newLeftoversRange.min;
+      existing.newLeftoversRange.max += node.newLeftoversRange.max;
+      for (const bp of node.byproductRanges) {
+        const existingBp = existing.byproductRanges.find((b) => b.itemName === bp.itemName);
+        if (existingBp) {
+          existingBp.range.min += bp.range.min;
+          existingBp.range.max += bp.range.max;
+        } else {
+          existing.byproductRanges.push({ itemName: bp.itemName, range: { ...bp.range } });
+        }
+      }
+    } else {
+      const itemDef = itemsByName.get(node.itemName);
+      const tier = itemDef ? getTierClass(itemDef, itemsById) : 'base';
+
+      merged.set(key, {
+        itemName: node.itemName,
+        workstation: node.workstation,
+        tier,
+        craftsPerformed: node.craftsPerformed,
+        quantityNeeded: node.quantityNeeded,
+        producedRange: { ...node.producedRange },
+        newLeftoversRange: { ...node.newLeftoversRange },
+        byproductRanges: node.byproductRanges.map((bp) => ({
+          itemName: bp.itemName,
+          range: { ...bp.range },
+        })),
+        ingredients,
+      });
+    }
+
+    // Record dependency edges: this step depends on each child step
+    if (!deps.has(key)) deps.set(key, new Set());
+    for (const child of node.children) {
+      deps.get(key)!.add(stepKey(child));
+    }
+  }
+
+  for (const entry of trees) {
+    walk(entry.tree);
+  }
+
+  // Phase 2: Topological sort with workstation grouping.
+  // Gather steps (no dependencies themselves) come first, sorted by name.
+  // Crafted steps are emitted in dependency order; when multiple steps are
+  // ready at the same time, they are grouped by workstation to minimise
+  // in-game movement between stations.
+
+  const allKeys = Array.from(merged.keys());
+  const remaining = new Set(allKeys);
+  const result: FlatCraftingStep[] = [];
+
+  // Emit all gather steps first, sorted alphabetically
+  const gatherKeys = allKeys
+    .filter((k) => k.startsWith('gather|'))
+    .sort((a, b) => a.localeCompare(b));
+  for (const k of gatherKeys) {
+    result.push(merged.get(k)!);
+    remaining.delete(k);
+  }
+
+  // Iteratively emit crafted steps whose dependencies are all satisfied
+  while (remaining.size > 0) {
+    const ready: string[] = [];
+    for (const k of remaining) {
+      const d = deps.get(k);
+      if (!d || Array.from(d).every((dep) => !remaining.has(dep))) {
+        ready.push(k);
+      }
+    }
+
+    if (ready.length === 0) {
+      // Safety: break cycles by emitting everything left
+      for (const k of remaining) result.push(merged.get(k)!);
+      break;
+    }
+
+    // Sort ready steps by workstation so same-station crafts are adjacent
+    ready.sort((a, b) => {
+      const sa = merged.get(a)!;
+      const sb = merged.get(b)!;
+      const wsCmp = sa.workstation.localeCompare(sb.workstation);
+      if (wsCmp !== 0) return wsCmp;
+      return sa.itemName.localeCompare(sb.itemName);
+    });
+
+    for (const k of ready) {
+      result.push(merged.get(k)!);
+      remaining.delete(k);
+    }
+  }
+
+  return result;
+}
+
 function CalculatorTab({ items, onSwitchToRegistry }: { items: Item[]; onSwitchToRegistry: () => void }) {
   const [targets, setTargets] = useState<ProductionTarget[]>([
     { itemId: items[0]?.id || "", quantity: 1 },
@@ -254,6 +408,8 @@ function CalculatorTab({ items, onSwitchToRegistry }: { items: Item[]; onSwitchT
   const itemsByName = useMemo(() => new Map(items.map(i => [i.name, i])), [items]);
   const itemsById = useMemo(() => new Map(items.map(i => [i.id, i])), [items]);
 
+  const [craftingView, setCraftingView] = useState<'tree' | 'steps'>('tree');
+
   const result: CalculationResult | null = useMemo(() => {
     const validTargets = targets
       .filter((t) => t.itemId && t.quantity > 0)
@@ -269,6 +425,11 @@ function CalculatorTab({ items, onSwitchToRegistry }: { items: Item[]; onSwitchT
       return null;
     }
   }, [targets, items]);
+
+  const flatSteps = useMemo(() => {
+    if (!result) return [];
+    return flattenCraftingTrees(result.trees, itemsByName, itemsById);
+  }, [result, itemsByName, itemsById]);
 
   if (items.length === 0) {
     return (
@@ -405,28 +566,55 @@ function CalculatorTab({ items, onSwitchToRegistry }: { items: Item[]; onSwitchT
 
           {result.trees.length > 0 && (
             <div className="mt-xl pt-md">
-              <h3 className="mb-md">Crafting Process</h3>
-              <div style={{ overflowX: 'auto', paddingBottom: 'var(--spacing-md)' }}>
-                {result.trees.map((entry, idx) => (
-                  <div key={idx} style={{ minWidth: 0 }}>
-                    {result.trees.length > 1 && (
-                      <h4 className="mb-sm mt-md text-secondary truncate" style={{ fontSize: '1rem' }} title={entry.itemName}>
-                        {entry.itemName}
-                      </h4>
-                    )}
-                    <div className="tree-node">
-                      <CraftingTreeNode node={entry.tree} isRoot={true} depth={0} itemsByName={itemsByName} itemsById={itemsById} />
-                    </div>
-                  </div>
-                ))}
+              <div className="flex items-center justify-between mb-md" style={{ gap: 'var(--spacing-sm)' }}>
+                <h3>Crafting Process</h3>
+                <div className="view-toggle" role="radiogroup" aria-label="Crafting view mode">
+                  <button
+                    type="button"
+                    className={`view-toggle__btn${craftingView === 'tree' ? ' view-toggle__btn--active' : ''}`}
+                    role="radio"
+                    aria-checked={craftingView === 'tree'}
+                    onClick={() => setCraftingView('tree')}
+                  >
+                    Tree
+                  </button>
+                  <button
+                    type="button"
+                    className={`view-toggle__btn${craftingView === 'steps' ? ' view-toggle__btn--active' : ''}`}
+                    role="radio"
+                    aria-checked={craftingView === 'steps'}
+                    onClick={() => setCraftingView('steps')}
+                  >
+                    Steps
+                  </button>
+                </div>
               </div>
+
+              {craftingView === 'tree' ? (
+                <div style={{ overflowX: 'auto', paddingBottom: 'var(--spacing-md)' }}>
+                  {result.trees.map((entry, idx) => (
+                    <div key={idx} style={{ minWidth: 0 }}>
+                      {result.trees.length > 1 && (
+                        <h4 className="mb-sm mt-md text-secondary truncate" style={{ fontSize: '1rem' }} title={entry.itemName}>
+                          {entry.itemName}
+                        </h4>
+                      )}
+                      <div className="tree-node">
+                        <CraftingTreeNode node={entry.tree} isRoot={true} depth={0} itemsByName={itemsByName} itemsById={itemsById} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <CraftingStepsList steps={flatSteps} />
+              )}
             </div>
           )}
         </>
         ) : (
           <div className="empty-state" style={{ padding: "var(--spacing-lg)" }}>
              <p className="text-secondary">
-               {hasValidTargets ? 'This recipe has a circular dependency — an item requires itself to craft. Edit the recipe in the Registry to fix this.' : 'Pick an item above to see what you need to craft it.'}
+               {hasValidTargets ? 'This recipe has a circular dependency — an item ends up requiring itself. Open the Registry and check the ingredient chain.' : 'Choose an item and quantity in the Production Run to see what you need.'}
              </p>
           </div>
         )}
@@ -505,6 +693,76 @@ const CraftingTreeNode = React.memo(function CraftingTreeNode({ node, isRoot, de
     </div>
   );
 });
+
+function CraftingStepsList({ steps }: { steps: FlatCraftingStep[] }) {
+  if (steps.length === 0) {
+    return (
+      <div className="empty-state" style={{ padding: 'var(--spacing-lg)' }}>
+        <p className="text-secondary">Nothing to craft. Every selected item is a base resource you can gather directly.</p>
+      </div>
+    );
+  }
+
+  return (
+    <ol className="steps-list">
+      {steps.map((step, idx) => {
+        const isGather = step.craftsPerformed === 0;
+        const showWorkstation = !isGather && hasWorkstation(step.workstation);
+        return (
+          <li key={`${step.itemName}-${step.workstation}-${idx}`} className={`steps-item steps-item--${step.tier}`}>
+            <span className="steps-item__number" aria-hidden="true">{idx + 1}</span>
+            <div className="steps-item__content">
+              <div className="steps-item__header">
+                <span className={`font-heading text-${step.tier}`} style={{ fontSize: '1.1rem', fontWeight: 500 }}>
+                  {step.itemName}
+                </span>
+                {isGather && <span className="tag tag-base">Gather</span>}
+                {showWorkstation && (
+                  <span className={`tag tag-${step.tier}`}>{step.workstation}</span>
+                )}
+              </div>
+              {isGather ? (
+                <p className="text-secondary text-sm">
+                  Gather {fmt.format(step.quantityNeeded)}&times; {step.itemName}
+                </p>
+              ) : (
+                <>
+                  <p className="text-secondary text-sm">
+                    Craft {fmt.format(step.craftsPerformed)}&times;{showWorkstation && <> at {step.workstation}</>} &rarr; {formatRange(step.producedRange)} produced
+                  </p>
+                  {step.ingredients.length > 0 && (
+                    <div className="steps-ingredient-list text-sm">
+                      {step.ingredients.map((ing) => (
+                        <span key={ing.itemName} className="steps-ingredient">
+                          {fmt.format(ing.perCraft)}&times; {ing.itemName}
+                          {step.craftsPerformed > 1 && (
+                            <span className="text-secondary"> ({fmt.format(ing.perCraft * step.craftsPerformed)} across all crafts)</span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {(step.newLeftoversRange.max > 0 || step.byproductRanges.length > 0) && (
+                    <div className="steps-ingredient-list text-sm">
+                      {step.newLeftoversRange.max > 0 && (
+                        <span className="text-refined">+{formatRange(step.newLeftoversRange)} left over</span>
+                      )}
+                      {step.byproductRanges.map((bp) => (
+                        <span key={bp.itemName} className="text-secondary">
+                          +{formatRange(bp.range)} {bp.itemName} (byproduct)
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
 
 function ManagerTab({
   items,

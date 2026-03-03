@@ -848,6 +848,99 @@ input[aria-invalid="true"], select[aria-invalid="true"] {
   }
 }
 
+/* View Toggle */
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.view-toggle__btn {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--surface-color);
+  border: none;
+  cursor: pointer;
+  transition: background var(--transition-fast) var(--ease-out-quart),
+              color var(--transition-fast) var(--ease-out-quart);
+  min-height: 36px;
+}
+
+.view-toggle__btn + .view-toggle__btn {
+  border-inline-start: 1px solid var(--border-color);
+}
+
+.view-toggle__btn:hover:not(.view-toggle__btn--active) {
+  background: var(--hover-overlay);
+}
+
+.view-toggle__btn--active {
+  background: var(--accent-color);
+  color: var(--accent-text);
+}
+
+/* Crafting Steps List */
+.steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  list-style: none;
+  counter-reset: step;
+}
+
+.steps-item {
+  display: flex;
+  gap: var(--spacing-md);
+  background: var(--surface-color);
+  border-radius: 6px;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-inline-start: 3px solid var(--border-color);
+}
+
+.steps-item--base { border-inline-start-color: var(--color-base); }
+.steps-item--refined { border-inline-start-color: var(--color-refined); }
+.steps-item--complex { border-inline-start-color: var(--color-complex); }
+.steps-item--final { border-inline-start-color: var(--color-final); }
+
+.steps-item__number {
+  font-family: var(--font-heading);
+  font-size: 1.5rem;
+  font-weight: 300;
+  color: var(--text-secondary);
+  min-width: 2rem;
+  text-align: center;
+  line-height: 1.2;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.steps-item__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+
+.steps-item__header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.steps-ingredient-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-md);
+}
+
+.steps-ingredient {
+  white-space: nowrap;
+}
+
 /* Empty State */
 .empty-state {
   display: flex;
